@@ -1,39 +1,33 @@
 import os
 import asyncio
 import feedparser
+import requests
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from openai import OpenAI
 
 # ================= CONFIG =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("Missing TELEGRAM_TOKEN")
 
-bot_app = None
-client = OpenAI(api_key=OPENAI_API_KEY)
-
 # ================= STATE =================
 last_report = ""
-last_event_state = False
 
 # ================= RSS =================
 RSS_FEEDS = [
     "https://feeds.bbci.co.uk/news/world/rss.xml",
     "https://www.aljazeera.com/xml/rss/all.xml",
-    "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
     "https://news.google.com/rss/search?q=Strait+of+Hormuz",
-    "https://news.google.com/rss/search?q=Iran+oil+shipping"
+    "https://news.google.com/rss/search?q=Iran+oil"
 ]
 
-KEYWORDS = ["hormuz", "iran", "oil", "shipping", "strait", "usa", "middle east"]
+KEYWORDS = ["hormuz", "iran", "oil", "shipping", "strait"]
 
-# ================= FETCH =================
+# ================= FETCH NEWS =================
 def fetch_news():
     news = []
 
@@ -49,64 +43,74 @@ def fetch_news():
 
     return news[:10]
 
-# ================= AI SUMMARY =================
-def ai_summary(news_text):
-    if not news_text:
-        return "Nessun aggiornamento rilevante."
+# ================= FREE AI (HUGGING FACE) =================
+def ai_summary(text):
+    if not text:
+        return "Nessuna informazione disponibile."
 
-    res = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Sei un analista OSINT. Riassumi in italiano in modo chiaro e breve."},
-            {"role": "user", "content": "\n".join(news_text)}
-        ]
-    )
+    API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-base"
 
-    return res.choices[0].message.content
+    headers = {}
+    hf_key = os.getenv("HF_API_KEY")
+    if hf_key:
+        headers["Authorization"] = f"Bearer {hf_key}"
+
+    payload = {
+        "inputs": f"Riassumi in italiano in modo semplice: {text}"
+    }
+
+    try:
+        r = requests.post(API_URL, headers=headers, json=payload, timeout=20)
+        result = r.json()
+
+        if isinstance(result, list) and "generated_text" in result[0]:
+            return result[0]["generated_text"]
+
+        return "Riassunto non disponibile, ma news ricevute correttamente."
+
+    except:
+        return "Errore AI, ma news disponibili."
 
 # ================= FORMAT =================
-def build_report(news):
-    now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
+def format_report(news):
+    now = datetime.now().strftime("%d/%m/%Y %H:%M UTC")
 
-    summary = ai_summary(news)
+    summary = ai_summary("\n".join(news))
 
     block = "\n".join(news)
 
     return f"""
-🌊 STRETTO DI HORMUZ — INTELLIGENCE REPORT
+🌊 STRETTO DI HORMUZ — OSINT REPORT
 
 📅 {now}
 
-🧠 RIASSUNTO AI:
+🧠 RIASSUNTO AI (GRATIS):
 {summary}
 
 📰 FONTI:
 {block}
 """
 
-# ================= DETECT EVENT =================
-def detect_event(news):
-    triggers = ["reopened", "reopen", "resumed", "traffic restored", "blockade lifted"]
+# ================= CHAT =================
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text.lower()
 
-    return any(any(t in n.lower() for t in triggers) for n in news)
+    news = fetch_news()
+
+    context_text = "\n".join(news)
+
+    response = ai_summary(f"{user_text}\n\nCONTESTO:\n{context_text}")
+
+    await update.message.reply_text(response)
 
 # ================= AUTO REPORT =================
 async def send_update():
-    global last_report, last_event_state
+    global last_report
 
     news = fetch_news()
-    report = build_report(news)
+    report = format_report(news)
 
-    event = detect_event(news)
-
-    # 🚨 ALERT SOLO SE CAMBIA STATO
-    if event and not last_event_state:
-        alert = "🚨 CAMBIO CONDIZIONI NELLO STRETTO DI HORMUZ"
-        await bot_app.bot.send_message(chat_id=CHAT_ID, text=alert)
-
-    last_event_state = event
-
-    # ❌ BLOCCO DUPLICATI
+    # evita spam
     if report == last_report:
         return
 
@@ -114,21 +118,7 @@ async def send_update():
 
     await bot_app.bot.send_message(chat_id=CHAT_ID, text=report)
 
-# ================= CHAT =================
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-
-    res = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Sei un analista OSINT sullo Stretto di Hormuz."},
-            {"role": "user", "content": user_text}
-        ]
-    )
-
-    await update.message.reply_text(res.choices[0].message.content)
-
-# ================= MAIN =================
+# ================= START =================
 async def main():
     global bot_app
 
@@ -137,12 +127,12 @@ async def main():
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_update, "interval", minutes=5)
+    scheduler.add_job(lambda: asyncio.create_task(send_update()), "interval", minutes=5)
     scheduler.start()
 
     await send_update()
 
-    print("Bot attivo")
+    print("Bot AI GRATIS attivo")
 
     await bot_app.run_polling()
 
