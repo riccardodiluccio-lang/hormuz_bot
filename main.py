@@ -2,21 +2,21 @@ import os
 import asyncio
 import feedparser
 from datetime import datetime
-from telegram import Bot
+from telegram import Bot, Update
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from openai import OpenAI
 
 # ================= CONFIG =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not TELEGRAM_TOKEN or not CHAT_ID:
-    raise ValueError("Missing TELEGRAM_TOKEN or CHAT_ID")
+if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
+    raise ValueError("Missing TELEGRAM_TOKEN or OPENAI_API_KEY")
 
 bot = Bot(token=TELEGRAM_TOKEN)
-
-# ================= STATE =================
-alert_mode = False
-alert_counter = 0
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ================= RSS =================
 RSS_FEEDS = [
@@ -27,7 +27,7 @@ RSS_FEEDS = [
     "https://news.google.com/rss/search?q=Iran+oil+shipping"
 ]
 
-KEYWORDS = ["hormuz", "iran", "oil", "shipping", "strait", "usa", "middle east"]
+KEYWORDS = ["hormuz", "iran", "oil", "shipping", "strait", "usa"]
 
 # ================= FETCH =================
 def fetch_news():
@@ -38,126 +38,89 @@ def fetch_news():
 
         for entry in feed.entries[:10]:
             title = entry.title
-            link = getattr(entry, "link", "no source")
+            link = getattr(entry, "link", "")
 
             if any(k in title.lower() for k in KEYWORDS):
-                news.append({"title": title, "link": link})
+                news.append(f"{title} | {link}")
 
-    return news[:15]
+    return news[:10]
 
-# ================= “AI” SUMMARY IN ITALIAN =================
-def summarize_it(news):
+# ================= AI SUMMARY =================
+def ai_summary(news):
     if not news:
-        return "Non ci sono sviluppi rilevanti al momento."
+        return "Nessun dato rilevante."
 
-    if len(news) < 3:
-        stato = "🟢 Attività bassa nella regione"
-    elif len(news) < 7:
-        stato = "🟡 Attività moderata e segnali geopolitici in evoluzione"
-    else:
-        stato = "🔴 Alta intensità informativa e possibili tensioni in aumento"
+    text = "\n".join(news)
 
-    keywords = {}
-    for n in news:
-        text = n["title"].lower()
-        for k in ["iran", "oil", "shipping", "usa", "strait"]:
-            if k in text:
-                keywords[k] = keywords.get(k, 0) + 1
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Sei un analista OSINT. Riassumi in italiano in modo chiaro e breve."},
+            {"role": "user", "content": text}
+        ]
+    )
 
-    segnali = ", ".join([f"{k}:{v}" for k, v in keywords.items()]) if keywords else "nessun segnale dominante"
+    return response.choices[0].message.content
 
-    return f"""
-{stato}
-
-📊 Analisi segnali:
-{segnali}
-
-🧠 Interpretazione:
-Il sistema sta monitorando flussi di notizie globali.
-Non ci sono conferme ufficiali di eventi critici in corso.
-"""
-
-# ================= FORMAT MESSAGE =================
-def format_message(news):
+# ================= FORMAT =================
+def format_report(news):
     now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
 
-    summary = summarize_it(news)
+    summary = ai_summary(news)
 
-    block = ""
-    for n in news[:10]:
-        block += f"📰 {n['title']}\n🔗 {n['link']}\n\n"
+    block = "\n".join(news)
 
     return f"""
-🌊 STRETTO DI HORMUZ — RAPPORTO INTELLIGENCE
+🌊 STRETTO DI HORMUZ — OSINT AI REPORT
 
 📅 {now}
 
-====================
-🧠 RIASSUNTO AI (ITALIANO)
-====================
+🧠 RIASSUNTO AI:
 {summary}
 
-====================
-📰 NOTIZIE (FONTE ORIGINALE)
-====================
-{block if block else "Nessuna notizia rilevante"}
-
-====================
-SISTEMA
-====================
-Monitoraggio automatico attivo via RSS globali
+📰 FONTI:
+{block}
 """
 
-# ================= ALERT DETECTION =================
-def detect_reopening(news):
-    triggers = ["reopened", "reopen", "resumed", "traffic restored", "blockade lifted"]
-
-    return any(any(t in n["title"].lower() for t in triggers) for n in news)
-
-# ================= SEND =================
+# ================= NEWS LOOP =================
 async def send_update():
-    global alert_mode, alert_counter
-
     news = fetch_news()
+    message = format_report(news)
 
-    if detect_reopening(news):
-        alert_mode = True
-        alert_counter = 15
+    await bot.send_message(chat_id=CHAT_ID, text=message)
 
-    if alert_mode:
-        msg = f"""
-🚨 AGGIORNAMENTO CRITICO — STRETTO DI HORMUZ 🚨
+# ================= CHAT FUNCTION =================
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
 
-RILEVATO POSSIBILE CAMBIAMENTO NELLE CONDIZIONI MARITTIME
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Sei un analista OSINT sullo Stretto di Hormuz. Rispondi solo usando contesto geopolitico e news."},
+            {"role": "user", "content": user_text}
+        ]
+    )
 
-STATO: ALLERTA ATTIVA
+    answer = response.choices[0].message.content
 
-MINUTI RIMANENTI: {alert_counter}
-"""
+    await update.message.reply_text(answer)
 
-        alert_counter -= 1
-
-        if alert_counter <= 0:
-            alert_mode = False
-
-        await bot.send_message(chat_id=CHAT_ID, text=msg.upper())
-
-    else:
-        await bot.send_message(
-            chat_id=CHAT_ID,
-            text=format_message(news)
-        )
-
-# ================= LOOP =================
+# ================= MAIN =================
 async def main():
+    # Telegram app
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_update, "interval", minutes=1)
+    scheduler.add_job(send_update, "interval", minutes=5)
     scheduler.start()
 
     await send_update()
 
-    while True:
-        await asyncio.sleep(60)
+    print("Bot AI attivo")
+
+    await app.run_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
