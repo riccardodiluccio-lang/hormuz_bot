@@ -2,7 +2,7 @@ import os
 import asyncio
 import feedparser
 from datetime import datetime
-from telegram import Bot, Update
+from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from openai import OpenAI
@@ -12,11 +12,15 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    raise ValueError("Missing TELEGRAM_TOKEN or OPENAI_API_KEY")
+if not TELEGRAM_TOKEN:
+    raise ValueError("Missing TELEGRAM_TOKEN")
 
-bot = Bot(token=TELEGRAM_TOKEN)
+bot_app = None
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+# ================= STATE =================
+last_report = ""
+last_event_state = False
 
 # ================= RSS =================
 RSS_FEEDS = [
@@ -27,7 +31,7 @@ RSS_FEEDS = [
     "https://news.google.com/rss/search?q=Iran+oil+shipping"
 ]
 
-KEYWORDS = ["hormuz", "iran", "oil", "shipping", "strait", "usa"]
+KEYWORDS = ["hormuz", "iran", "oil", "shipping", "strait", "usa", "middle east"]
 
 # ================= FETCH =================
 def fetch_news():
@@ -46,24 +50,22 @@ def fetch_news():
     return news[:10]
 
 # ================= AI SUMMARY =================
-def ai_summary(news):
-    if not news:
-        return "Nessun dato rilevante."
+def ai_summary(news_text):
+    if not news_text:
+        return "Nessun aggiornamento rilevante."
 
-    text = "\n".join(news)
-
-    response = client.chat.completions.create(
+    res = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "Sei un analista OSINT. Riassumi in italiano in modo chiaro e breve."},
-            {"role": "user", "content": text}
+            {"role": "user", "content": "\n".join(news_text)}
         ]
     )
 
-    return response.choices[0].message.content
+    return res.choices[0].message.content
 
 # ================= FORMAT =================
-def format_report(news):
+def build_report(news):
     now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
 
     summary = ai_summary(news)
@@ -71,7 +73,7 @@ def format_report(news):
     block = "\n".join(news)
 
     return f"""
-🌊 STRETTO DI HORMUZ — OSINT AI REPORT
+🌊 STRETTO DI HORMUZ — INTELLIGENCE REPORT
 
 📅 {now}
 
@@ -82,35 +84,57 @@ def format_report(news):
 {block}
 """
 
-# ================= NEWS LOOP =================
+# ================= DETECT EVENT =================
+def detect_event(news):
+    triggers = ["reopened", "reopen", "resumed", "traffic restored", "blockade lifted"]
+
+    return any(any(t in n.lower() for t in triggers) for n in news)
+
+# ================= AUTO REPORT =================
 async def send_update():
+    global last_report, last_event_state
+
     news = fetch_news()
-    message = format_report(news)
+    report = build_report(news)
 
-    await bot.send_message(chat_id=CHAT_ID, text=message)
+    event = detect_event(news)
 
-# ================= CHAT FUNCTION =================
+    # 🚨 ALERT SOLO SE CAMBIA STATO
+    if event and not last_event_state:
+        alert = "🚨 CAMBIO CONDIZIONI NELLO STRETTO DI HORMUZ"
+        await bot_app.bot.send_message(chat_id=CHAT_ID, text=alert)
+
+    last_event_state = event
+
+    # ❌ BLOCCO DUPLICATI
+    if report == last_report:
+        return
+
+    last_report = report
+
+    await bot_app.bot.send_message(chat_id=CHAT_ID, text=report)
+
+# ================= CHAT =================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
 
-    response = client.chat.completions.create(
+    res = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Sei un analista OSINT sullo Stretto di Hormuz. Rispondi solo usando contesto geopolitico e news."},
+            {"role": "system", "content": "Sei un analista OSINT sullo Stretto di Hormuz."},
             {"role": "user", "content": user_text}
         ]
     )
 
-    answer = response.choices[0].message.content
-
-    await update.message.reply_text(answer)
+    await update.message.reply_text(res.choices[0].message.content)
 
 # ================= MAIN =================
 async def main():
-    # Telegram app
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    global bot_app
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(send_update, "interval", minutes=5)
@@ -118,9 +142,9 @@ async def main():
 
     await send_update()
 
-    print("Bot AI attivo")
+    print("Bot attivo")
 
-    await app.run_polling()
+    await bot_app.run_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
