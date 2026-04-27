@@ -16,6 +16,7 @@ if not TELEGRAM_TOKEN:
 
 # ================= STATE =================
 last_report = ""
+seen_news = set()
 
 # ================= RSS =================
 RSS_FEEDS = [
@@ -25,21 +26,27 @@ RSS_FEEDS = [
     "https://news.google.com/rss/search?q=Iran+oil"
 ]
 
-KEYWORDS = ["hormuz", "iran", "oil", "shipping", "strait"]
+KEYWORDS = ["hormuz", "iran", "oil", "shipping", "strait", "middle east"]
 
-# ================= FETCH NEWS =================
+# ================= FETCH NEWS (NO DUPLICATI) =================
 def fetch_news():
+    global seen_news
+
     news = []
 
     for url in RSS_FEEDS:
         feed = feedparser.parse(url)
 
         for entry in feed.entries[:10]:
-            title = entry.title
+            title = entry.title.strip()
             link = getattr(entry, "link", "")
 
-            if any(k in title.lower() for k in KEYWORDS):
-                news.append(f"{title} | {link}")
+            news_id = title.lower()
+
+            if any(k in news_id for k in KEYWORDS):
+                if news_id not in seen_news:
+                    seen_news.add(news_id)
+                    news.append(f"{title} | {link}")
 
     return news[:10]
 
@@ -51,33 +58,36 @@ def ai_summary(text):
     API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-base"
 
     headers = {}
+
     hf_key = os.getenv("HF_API_KEY")
     if hf_key:
         headers["Authorization"] = f"Bearer {hf_key}"
 
-    payload = {
-        "inputs": f"Riassumi in italiano in modo semplice: {text}"
-    }
-
     try:
-        r = requests.post(API_URL, headers=headers, json=payload, timeout=20)
-        result = r.json()
+        response = requests.post(
+            API_URL,
+            headers=headers,
+            json={"inputs": f"Riassumi in italiano: {text}"},
+            timeout=20
+        )
 
-        if isinstance(result, list) and "generated_text" in result[0]:
-            return result[0]["generated_text"]
+        data = response.json()
 
-        return "Riassunto non disponibile, ma news ricevute correttamente."
+        if isinstance(data, list) and "generated_text" in data[0]:
+            return data[0]["generated_text"]
+
+        return "Riassunto non disponibile (ma news ricevute)."
 
     except:
         return "Errore AI, ma news disponibili."
 
-# ================= FORMAT =================
+# ================= FORMAT REPORT =================
 def format_report(news):
     now = datetime.now().strftime("%d/%m/%Y %H:%M UTC")
 
     summary = ai_summary("\n".join(news))
 
-    block = "\n".join(news)
+    block = "\n".join(news) if news else "Nessuna nuova notizia."
 
     return f"""
 🌊 STRETTO DI HORMUZ — OSINT REPORT
@@ -87,11 +97,11 @@ def format_report(news):
 🧠 RIASSUNTO AI (GRATIS):
 {summary}
 
-📰 FONTI:
+📰 NOTIZIE:
 {block}
 """
 
-# ================= CHAT =================
+# ================= CHAT BOT =================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text.lower()
 
@@ -99,9 +109,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context_text = "\n".join(news)
 
-    response = ai_summary(f"{user_text}\n\nCONTESTO:\n{context_text}")
+    answer = ai_summary(f"Domanda: {user_text}\n\nContesto:\n{context_text}")
 
-    await update.message.reply_text(response)
+    await update.message.reply_text(answer)
 
 # ================= AUTO REPORT =================
 async def send_update():
@@ -110,7 +120,7 @@ async def send_update():
     news = fetch_news()
     report = format_report(news)
 
-    # evita spam
+    # ❌ blocco duplicati messaggio
     if report == last_report:
         return
 
@@ -118,7 +128,7 @@ async def send_update():
 
     await bot_app.bot.send_message(chat_id=CHAT_ID, text=report)
 
-# ================= START =================
+# ================= START BOT =================
 async def main():
     global bot_app
 
@@ -132,7 +142,7 @@ async def main():
 
     await send_update()
 
-    print("Bot AI GRATIS attivo")
+    print("Bot attivo e stabile")
 
     await bot_app.run_polling()
 
