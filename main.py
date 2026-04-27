@@ -1,46 +1,61 @@
 import os
-import requests
 import asyncio
 from telegram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 
+# === CONFIGURAZIONE ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-HORMUZ_API_URL = os.getenv("HORMUZ_API_URL", "https://api.hormuzmonitor.com/v2")
 
 if not TELEGRAM_TOKEN or not CHAT_ID:
-    raise ValueError("Devi impostare TELEGRAM_TOKEN e CHAT_ID")
+    raise ValueError("Devi impostare TELEGRAM_TOKEN e CHAT_ID nelle variables di Railway")
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
+# === FALSO DATA LOADER (API DISATTIVATA) ===
 def get_hormuz_data():
-    try:
-        risk = requests.get(f"{HORMUZ_API_URL}/risk", timeout=10).json()
-        traffic = requests.get(f"{HORMUZ_API_URL}/traffic", timeout=10).json()
-        crisis = requests.get(f"{HORMUZ_API_URL}/crisis", timeout=10).json()
-        prices = requests.get(f"{HORMUZ_API_URL}/prices", timeout=10).json()
-        return risk, traffic, crisis, prices
-    except:
-        return None, None, None, None
+    return None, None, None, None
 
+# === MESSAGGIO STABILE ===
 def format_report(risk, traffic, crisis, prices):
-    if not all([risk, traffic, crisis, prices]):
-        return "⚠️ Errore recupero dati"
+    now = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    r = risk.get("data", {})
-    return f"🌊 Hormuz Update\nRischio: {r.get('risk_score')}"
+    return f"""
+🌊 **STRETTO DI HORMUZ — MONITOR**
 
+📅 {now} UTC
+
+⚠️ Sistema in modalità stabile
+📡 Dati esterni non disponibili
+
+🟢 Bot attivo su Railway
+🤖 Monitoraggio automatico ogni 15 minuti
+
+🔗 Sistema operativo
+"""
+
+# === INVIO TELEGRAM ===
 async def send_update():
-    risk, traffic, crisis, prices = get_hormuz_data()
-    message = format_report(risk, traffic, crisis, prices)
+    message = format_report(None, None, None, None)
 
-    await bot.send_message(chat_id=CHAT_ID, text=message)
+    try:
+        await bot.send_message(
+            chat_id=CHAT_ID,
+            text=message,
+            parse_mode="Markdown"
+        )
+        print("Messaggio inviato")
+    except Exception as e:
+        print(f"Errore invio: {e}")
 
+# === MAIN LOOP ===
 async def main():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(send_update, 'interval', minutes=15)
     scheduler.start()
+
+    print("Bot avviato su Railway")
 
     await send_update()
 
