@@ -1,4 +1,4 @@
 feedparser
 python-telegram-bot
 apscheduler
-openai
+requests
