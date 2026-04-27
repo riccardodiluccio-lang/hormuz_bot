@@ -18,7 +18,7 @@ bot = Bot(token=TELEGRAM_TOKEN)
 alert_mode = False
 alert_counter = 0
 
-# ================= RSS SOURCES =================
+# ================= RSS =================
 RSS_FEEDS = [
     "https://feeds.bbci.co.uk/news/world/rss.xml",
     "https://www.aljazeera.com/xml/rss/all.xml",
@@ -27,12 +27,9 @@ RSS_FEEDS = [
     "https://news.google.com/rss/search?q=Iran+oil+shipping"
 ]
 
-KEYWORDS = [
-    "hormuz", "strait", "iran", "oil",
-    "shipping", "tankers", "middle east", "usa"
-]
+KEYWORDS = ["hormuz", "iran", "oil", "shipping", "strait", "usa", "middle east"]
 
-# ================= FETCH NEWS =================
+# ================= FETCH =================
 def fetch_news():
     news = []
 
@@ -43,106 +40,101 @@ def fetch_news():
             title = entry.title
             link = getattr(entry, "link", "no source")
 
-            text = title.lower()
-
-            if any(k in text for k in KEYWORDS):
+            if any(k in title.lower() for k in KEYWORDS):
                 news.append({"title": title, "link": link})
 
     return news[:15]
 
-# ================= DETECT REOPENING =================
-def detect_reopening(news):
-    triggers = ["reopened", "reopen", "resumed", "traffic restored", "blockade lifted"]
-
-    for n in news:
-        t = n["title"].lower()
-        if any(x in t for x in triggers):
-            return True
-    return False
-
-# ================= AI SUMMARY =================
-def summarize(news):
+# ================= “AI” SUMMARY IN ITALIAN =================
+def summarize_it(news):
     if not news:
-        return "No relevant activity detected."
+        return "Non ci sono sviluppi rilevanti al momento."
 
     if len(news) < 3:
-        tone = "🟢 LOW ACTIVITY"
+        stato = "🟢 Attività bassa nella regione"
     elif len(news) < 7:
-        tone = "🟡 MODERATE ACTIVITY"
+        stato = "🟡 Attività moderata e segnali geopolitici in evoluzione"
     else:
-        tone = "🔴 HIGH ACTIVITY"
+        stato = "🔴 Alta intensità informativa e possibili tensioni in aumento"
 
     keywords = {}
     for n in news:
+        text = n["title"].lower()
         for k in ["iran", "oil", "shipping", "usa", "strait"]:
-            if k in n["title"].lower():
+            if k in text:
                 keywords[k] = keywords.get(k, 0) + 1
 
-    signal = ", ".join([f"{k}:{v}" for k, v in keywords.items()]) if keywords else "no signals"
+    segnali = ", ".join([f"{k}:{v}" for k, v in keywords.items()]) if keywords else "nessun segnale dominante"
 
     return f"""
-{tone}
+{stato}
 
-SIGNAL ANALYSIS:
-{signal}
+📊 Analisi segnali:
+{segnali}
 
-INTERPRETATION:
-Automated OSINT scan indicates current information flow based on global news sources.
+🧠 Interpretazione:
+Il sistema sta monitorando flussi di notizie globali.
+Non ci sono conferme ufficiali di eventi critici in corso.
 """
 
 # ================= FORMAT MESSAGE =================
 def format_message(news):
     now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
 
-    summary = summarize(news)
+    summary = summarize_it(news)
 
-    news_block = ""
+    block = ""
     for n in news[:10]:
-        news_block += f"📰 {n['title']}\n🔗 {n['link']}\n\n"
+        block += f"📰 {n['title']}\n🔗 {n['link']}\n\n"
 
     return f"""
-🌊 STRAIT OF HORMUZ — OSINT INTELLIGENCE
+🌊 STRETTO DI HORMUZ — RAPPORTO INTELLIGENCE
 
 📅 {now}
 
 ====================
-AI SUMMARY
+🧠 RIASSUNTO AI (ITALIANO)
 ====================
 {summary}
 
 ====================
-NEWS FEED
+📰 NOTIZIE (FONTE ORIGINALE)
 ====================
-{news_block if news_block else "No news available"}
+{block if block else "Nessuna notizia rilevante"}
 
 ====================
-SYSTEM STATUS
+SISTEMA
 ====================
-Monitoring active via RSS sources
+Monitoraggio automatico attivo via RSS globali
 """
 
-# ================= SEND LOGIC =================
+# ================= ALERT DETECTION =================
+def detect_reopening(news):
+    triggers = ["reopened", "reopen", "resumed", "traffic restored", "blockade lifted"]
+
+    return any(any(t in n["title"].lower() for t in triggers) for n in news)
+
+# ================= SEND =================
 async def send_update():
     global alert_mode, alert_counter
 
     news = fetch_news()
 
-    # trigger alert mode
     if detect_reopening(news):
         alert_mode = True
         alert_counter = 15
 
-    # ALERT MODE
     if alert_mode:
         msg = f"""
-🚨 STRAIT OF HORMUZ STATUS CHANGE DETECTED 🚨
+🚨 AGGIORNAMENTO CRITICO — STRETTO DI HORMUZ 🚨
 
-POSSIBLE MAJOR CHANGE IN MARITIME CONDITIONS
+RILEVATO POSSIBILE CAMBIAMENTO NELLE CONDIZIONI MARITTIME
 
-ALERT ACTIVE
+STATO: ALLERTA ATTIVA
 
-REMAINING MINUTES: {alert_counter}
+MINUTI RIMANENTI: {alert_counter}
 """
+
         alert_counter -= 1
 
         if alert_counter <= 0:
@@ -151,11 +143,12 @@ REMAINING MINUTES: {alert_counter}
         await bot.send_message(chat_id=CHAT_ID, text=msg.upper())
 
     else:
-        msg = format_message(news)
+        await bot.send_message(
+            chat_id=CHAT_ID,
+            text=format_message(news)
+        )
 
-        await bot.send_message(chat_id=CHAT_ID, text=msg)
-
-# ================= MAIN LOOP =================
+# ================= LOOP =================
 async def main():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(send_update, "interval", minutes=1)
