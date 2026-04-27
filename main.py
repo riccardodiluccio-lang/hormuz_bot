@@ -1,61 +1,95 @@
 import os
 import asyncio
+import feedparser
 from telegram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 
-# === CONFIGURAZIONE ===
+# === CONFIG ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 if not TELEGRAM_TOKEN or not CHAT_ID:
-    raise ValueError("Devi impostare TELEGRAM_TOKEN e CHAT_ID nelle variables di Railway")
+    raise ValueError("Missing TELEGRAM_TOKEN or CHAT_ID")
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# === FALSO DATA LOADER (API DISATTIVATA) ===
-def get_hormuz_data():
-    return None, None, None, None
+# === FONTI NEWS ===
+RSS_FEEDS = [
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "https://www.aljazeera.com/xml/rss/all.xml",
+    "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+    "https://news.google.com/rss/search?q=Strait+of+Hormuz&hl=en-US&gl=US&ceid=US:en"
+]
 
-# === MESSAGGIO STABILE ===
-def format_report(risk, traffic, crisis, prices):
-    now = datetime.now().strftime("%d/%m/%Y %H:%M")
+KEYWORDS = [
+    "hormuz",
+    "strait of hormuz",
+    "iran",
+    "oil",
+    "shipping",
+    "tankers",
+    "middle east"
+]
+
+# === FETCH NEWS ===
+def fetch_news():
+    articles = []
+
+    for url in RSS_FEEDS:
+        feed = feedparser.parse(url)
+
+        for entry in feed.entries[:5]:
+            title = entry.title
+            summary = getattr(entry, "summary", "")
+
+            text = f"{title} {summary}".lower()
+
+            if any(k in text for k in KEYWORDS):
+                articles.append(f"📰 {title}")
+
+    return articles[:10]
+
+# === FORMAT ===
+def format_report(articles):
+    now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
+
+    if not articles:
+        news_text = "⚠️ Nessuna news rilevante trovata al momento"
+    else:
+        news_text = "\n".join(articles)
 
     return f"""
-🌊 **STRETTO DI HORMUZ — MONITOR**
+🌊 STRAIT OF HORMUZ — OSINT MONITOR
 
-📅 {now} UTC
+📅 {now}
 
-⚠️ Sistema in modalità stabile
-📡 Dati esterni non disponibili
+📰 NEWS GLOBALI RILEVANTI:
+{news_text}
 
-🟢 Bot attivo su Railway
-🤖 Monitoraggio automatico ogni 15 minuti
-
-🔗 Sistema operativo
+📡 Fonti: BBC / Al Jazeera / NYT / Google News
+🤖 Auto-monitoraggio attivo (Railway)
 """
 
-# === INVIO TELEGRAM ===
+# === SEND ===
 async def send_update():
-    message = format_report(None, None, None, None)
+    articles = fetch_news()
+    message = format_report(articles)
 
     try:
         await bot.send_message(
             chat_id=CHAT_ID,
-            text=message,
-            parse_mode="Markdown"
+            text=message
         )
-        print("Messaggio inviato")
+        print("Update sent")
     except Exception as e:
-        print(f"Errore invio: {e}")
+        print("Error:", e)
 
-# === MAIN LOOP ===
+# === LOOP ===
 async def main():
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_update, 'interval', minutes=15)
+    scheduler.add_job(send_update, "interval", minutes=15)
     scheduler.start()
-
-    print("Bot avviato su Railway")
 
     await send_update()
 
