@@ -141,7 +141,7 @@ async def main():
     scheduler.add_job(collect_job, "interval", minutes=1)
 
     # ogni 15 min manda report
-    scheduler.add_job(send_job, "interval", minutes=15)
+    scheduler.add_job(send_job, "interval", minutes=1)
 
     scheduler.start()
 
