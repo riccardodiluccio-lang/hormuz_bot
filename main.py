@@ -1,150 +1,154 @@
 import os
 import asyncio
 import feedparser
-import requests
+import hashlib
 from datetime import datetime
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ================= CONFIG =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-if not TELEGRAM_TOKEN:
-    raise ValueError("Missing TELEGRAM_TOKEN")
+bot = Bot(token=TELEGRAM_TOKEN)
 
 # ================= STATE =================
-last_report = ""
 seen_news = set()
+collected_news = []
 
-# ================= RSS =================
-RSS_FEEDS = [
-    "https://feeds.bbci.co.uk/news/world/rss.xml",
-    "https://www.aljazeera.com/xml/rss/all.xml",
-    "https://news.google.com/rss/search?q=Strait+of+Hormuz",
-    "https://news.google.com/rss/search?q=Iran+oil"
-]
+# ================= RSS (GLOBAL AGGREGATOR) =================
+RSS_URL = "https://news.google.com/rss/search?q=Strait+of+Hormuz+OR+Iran+oil+shipping&hl=en&gl=US&ceid=US:en"
 
-KEYWORDS = ["hormuz", "iran", "oil", "shipping", "strait", "middle east"]
-
-# ================= FETCH NEWS (NO DUPLICATI) =================
+# ================= FETCH NEWS =================
 def fetch_news():
-    global seen_news
+    global seen_news, collected_news
 
-    news = []
+    feed = feedparser.parse(RSS_URL)
 
-    for url in RSS_FEEDS:
-        feed = feedparser.parse(url)
+    for entry in feed.entries:
+        title = entry.title.strip()
+        link = entry.link
 
-        for entry in feed.entries[:10]:
-            title = entry.title.strip()
-            link = getattr(entry, "link", "")
+        # crea ID unico
+        news_id = hashlib.md5(title.encode()).hexdigest()
 
-            news_id = title.lower()
+        if news_id not in seen_news:
+            seen_news.add(news_id)
 
-            if any(k in news_id for k in KEYWORDS):
-                if news_id not in seen_news:
-                    seen_news.add(news_id)
-                    news.append(f"{title} | {link}")
+            collected_news.append({
+                "title": title,
+                "link": link
+            })
 
-    return news[:10]
+# ================= SIMPLE AI SUMMARY (NO API) =================
+def summarize_news(news):
+    if not news:
+        return "Nessun aggiornamento rilevante nelle ultime ore."
 
-# ================= FREE AI (HUGGING FACE) =================
-def ai_summary(text):
-    if not text:
-        return "Nessuna informazione disponibile."
+    # prendi max 10 notizie più recenti
+    recent = news[-10:]
 
-    API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-base"
+    keywords = {
+        "iran": 0,
+        "oil": 0,
+        "shipping": 0,
+        "military": 0,
+        "attack": 0
+    }
 
-    headers = {}
+    for n in recent:
+        text = n["title"].lower()
+        for k in keywords:
+            if k in text:
+                keywords[k] += 1
 
-    hf_key = os.getenv("HF_API_KEY")
-    if hf_key:
-        headers["Authorization"] = f"Bearer {hf_key}"
-
-    try:
-        response = requests.post(
-            API_URL,
-            headers=headers,
-            json={"inputs": f"Riassumi in italiano: {text}"},
-            timeout=20
-        )
-
-        data = response.json()
-
-        if isinstance(data, list) and "generated_text" in data[0]:
-            return data[0]["generated_text"]
-
-        return "Riassunto non disponibile (ma news ricevute)."
-
-    except:
-        return "Errore AI, ma news disponibili."
-
-# ================= FORMAT REPORT =================
-def format_report(news):
-    now = datetime.now().strftime("%d/%m/%Y %H:%M UTC")
-
-    summary = ai_summary("\n".join(news))
-
-    block = "\n".join(news) if news else "Nessuna nuova notizia."
+    livello = "🟢 BASSO"
+    if sum(keywords.values()) > 10:
+        livello = "🔴 ALTO"
+    elif sum(keywords.values()) > 5:
+        livello = "🟡 MEDIO"
 
     return f"""
-🌊 STRETTO DI HORMUZ — OSINT REPORT
+Livello attività: {livello}
+
+Segnali rilevati:
+{', '.join([f"{k}:{v}" for k,v in keywords.items() if v > 0])}
+
+Sintesi:
+Le notizie indicano un'attività monitorata nella regione dello Stretto di Hormuz, con aggiornamenti da fonti internazionali.
+"""
+
+# ================= FORMAT =================
+def format_report():
+    global collected_news
+
+    now = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    if not collected_news:
+        return "Nessuna nuova notizia disponibile."
+
+    summary = summarize_news(collected_news)
+
+    # prendi ultime 10
+    recent = collected_news[-10:]
+
+    news_text = ""
+    for n in recent:
+        news_text += f"📰 {n['title']}\n🔗 {n['link']}\n\n"
+
+    return f"""
+🌊 STRETTO DI HORMUZ — REPORT
 
 📅 {now}
 
-🧠 RIASSUNTO AI (GRATIS):
+====================
+🧠 RIASSUNTO
+====================
 {summary}
 
-📰 NOTIZIE:
-{block}
+====================
+📰 NOTIZIE
+====================
+{news_text}
 """
 
-# ================= CHAT BOT =================
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text.lower()
+# ================= JOB OGNI MINUTO =================
+async def collect_job():
+    fetch_news()
 
-    news = fetch_news()
+# ================= INVIO OGNI 15 MIN =================
+async def send_job():
+    global collected_news
 
-    context_text = "\n".join(news)
-
-    answer = ai_summary(f"Domanda: {user_text}\n\nContesto:\n{context_text}")
-
-    await update.message.reply_text(answer)
-
-# ================= AUTO REPORT =================
-async def send_update():
-    global last_report
-
-    news = fetch_news()
-    report = format_report(news)
-
-    # ❌ blocco duplicati messaggio
-    if report == last_report:
+    if not collected_news:
         return
 
-    last_report = report
+    report = format_report()
 
-    await bot_app.bot.send_message(chat_id=CHAT_ID, text=report)
+    await bot.send_message(
+        chat_id=CHAT_ID,
+        text=report
+    )
 
-# ================= START BOT =================
+    # svuota dopo invio (evita duplicati futuri)
+    collected_news = []
+
+# ================= MAIN =================
 async def main():
-    global bot_app
-
-    bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(lambda: asyncio.create_task(send_update()), "interval", minutes=5)
+
+    # ogni minuto raccoglie news
+    scheduler.add_job(collect_job, "interval", minutes=1)
+
+    # ogni 15 min manda report
+    scheduler.add_job(send_job, "interval", minutes=15)
+
     scheduler.start()
 
-    await send_update()
+    print("Bot stabile avviato")
 
-    print("Bot attivo e stabile")
-
-    await bot_app.run_polling()
+    while True:
+        await asyncio.sleep(60)
 
 if __name__ == "__main__":
     asyncio.run(main())
