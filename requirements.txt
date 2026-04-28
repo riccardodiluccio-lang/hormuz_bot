@@ -1,4 +1,3 @@
 feedparser
 python-telegram-bot
 apscheduler
-requests
