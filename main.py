@@ -137,21 +137,18 @@ async def send_job():
 async def main():
     scheduler = AsyncIOScheduler()
 
-    # ogni minuto raccoglie news
     scheduler.add_job(collect_job, "interval", minutes=1)
-
-    # ogni 15 min manda report
-    scheduler.add_job(send_job, "interval", minutes=1)
+    scheduler.add_job(send_job, "interval", minutes=15)
 
     scheduler.start()
 
-# 👇 AGGIUNGI QUESTO
-await send_job()
+    # ✅ INVIO SUBITO (CORRETTO)
+    await send_job()
 
-print("Bot stabile avviato")
+    print("Bot stabile avviato")
 
-while True:
-    await asyncio.sleep(60)
+    while True:
+        await asyncio.sleep(60)
 
 if __name__ == "__main__":
     asyncio.run(main())
