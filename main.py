@@ -145,10 +145,13 @@ async def main():
 
     scheduler.start()
 
-    print("Bot stabile avviato")
+# 👇 AGGIUNGI QUESTO
+await send_job()
 
-    while True:
-        await asyncio.sleep(60)
+print("Bot stabile avviato")
+
+while True:
+    await asyncio.sleep(60)
 
 if __name__ == "__main__":
     asyncio.run(main())
